@@ -1,6 +1,7 @@
 #ifndef PARSER_TEST_HPP
 #define PARSER_TEST_HPP
 
+#include "check.hpp"
 #include "time_and_location/parser.hpp"
 
 #include <array>
@@ -88,6 +89,57 @@ parse_coordinate_test ()
           throw std::runtime_error ("coordinate parser test  failed");
         }
     }
+}
+
+void
+parse_coordinate_edge_test ()
+{
+  // Latitudes below 10 degrees start with '0', longitudes above 99 do not.
+  const auto low_lat = parse_coordinate ("0530.1234,N");
+  check (low_lat.degree == 5, "low latitude degree");
+  check_near (low_lat.minute, 30.1234, 1e-9, "low latitude minute");
+
+  const auto high_lon = parse_coordinate ("12345.678,E");
+  check (high_lon.degree == 123, "high longitude degree");
+  check_near (high_lon.minute, 45.678, 1e-9, "high longitude minute");
+
+  // Without the comma no digit may be lost.
+  check_near (parse_coordinate ("3958.59380N").minute, 58.5938, 1e-12,
+              "coordinate without comma");
+
+  check_near (coordinate_to_decimal ({ 32, 30.0, 'W' }), -32.5, 1e-12,
+              "west longitude");
+  check_near (coordinate_to_decimal ({ 33, 51.408, 'S' }), -33.8568, 1e-12,
+              "south latitude");
+
+  check_throws<std::invalid_argument> (
+      [] { (void)parse_coordinate ("39a8.59,N"); }, "garbage coordinate");
+  check_throws<std::invalid_argument> (
+      [] { (void)parse_coordinate ("3958.59,X"); }, "bad indicator");
+  check_throws<std::invalid_argument> (
+      [] { (void)parse_coordinate ("3978.59,N"); }, "minute out of range");
+  check_throws<std::invalid_argument> ([] { (void)parse_coordinate (",N"); },
+                                       "empty coordinate");
+}
+
+void
+parse_utc_test ()
+{
+  check (parse_utc ("072244.50") == utc{ 7, 22, 44, 500 }, "utc fraction");
+  check (parse_utc ("072244") == utc{ 7, 22, 44 }, "utc without fraction");
+  check_throws<std::invalid_argument> ([] { (void)parse_utc ("07224"); },
+                                       "short utc");
+  check_throws<std::invalid_argument> ([] { (void)parse_utc ("256000.00"); },
+                                       "hour out of range");
+  check_throws<std::invalid_argument> ([] { (void)parse_date ("320724"); },
+                                       "day out of range");
+
+  check_near (utc{ 7, 22, 45, 250 } - utc{ 7, 22, 44 }, 1.25, 1e-9,
+              "utc difference");
+  check_near (utc{ 7, 22, 44 } - utc{ 7, 22, 45 }, -1.0, 1e-9,
+              "negative utc difference");
+  check_near (utc{ 0, 0, 1 } - utc{ 23, 59, 59 }, 2.0, 1e-9,
+              "utc difference across midnight");
 }
 
 #endif // !PARSER_TEST_HPP

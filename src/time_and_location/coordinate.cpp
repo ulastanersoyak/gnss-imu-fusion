@@ -8,7 +8,7 @@ operator== (const coordinate &coord1, const coordinate &coord2)
   // clang-format off
   return (coord1.indicator == coord2.indicator)
          && ((std::abs (coord1.minute - coord2.minute)
-         <= (std::max (std::abs (coord1.minute), 
+         <= (std::max (std::abs (coord1.minute),
              std::abs (coord2.minute)) * 0.001)))
          && (coord1.degree == coord2.degree);
   // clang-format on
@@ -17,7 +17,7 @@ operator== (const coordinate &coord1, const coordinate &coord2)
 double
 coordinate_to_decimal (const coordinate &coord)
 {
-  return ((coord.indicator == 'W') || (coord.indicator == 'S'))
-             ? coord.degree + (coord.minute / 60) * -1
-             : (coord.degree + (coord.minute / 60));
+  const double decimal = coord.degree + (coord.minute / 60);
+  return ((coord.indicator == 'W') || (coord.indicator == 'S')) ? -decimal
+                                                                : decimal;
 }

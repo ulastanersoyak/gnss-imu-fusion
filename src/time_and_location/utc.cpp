@@ -1,22 +1,37 @@
 #include "time_and_location/utc.hpp"
 
-[[nodiscard]] std::uint32_t
+#include <iomanip>
+
+[[nodiscard]] double
 utc::operator- (const utc &other) const noexcept
 {
-  const auto this_seconds = static_cast<std::uint32_t> (
-      (this->hour * 3600) + (this->minute * 60) + (this->second));
+  constexpr double seconds_per_day = 86400.0;
+  const auto to_seconds = [] (const utc &u)
+    {
+      return (u.hour * 3600.0) + (u.minute * 60.0) + u.second
+             + (u.millisecond / 1000.0);
+    };
 
-  const auto other_seconds = static_cast<std::uint32_t> (
-      (other.hour * 3600) + (other.minute * 60) + (other.second));
-
-  return this_seconds - other_seconds;
+  double diff = to_seconds (*this) - to_seconds (other);
+  if (diff >= seconds_per_day / 2)
+    {
+      diff -= seconds_per_day;
+    }
+  else if (diff < -seconds_per_day / 2)
+    {
+      diff += seconds_per_day;
+    }
+  return diff;
 }
 
 std::ostream &
 operator<< (std::ostream &os, const utc &utc)
 {
-  os << "Hour: " << static_cast<int> (utc.hour) << ", "
-     << "Minute: " << static_cast<int> (utc.minute) << ", "
-     << "Second: " << static_cast<int> (utc.second);
+  const auto fill = os.fill ('0');
+  os << std::setw (2) << static_cast<int> (utc.hour) << ':' << std::setw (2)
+     << static_cast<int> (utc.minute) << ':' << std::setw (2)
+     << static_cast<int> (utc.second) << '.' << std::setw (3)
+     << utc.millisecond;
+  os.fill (fill);
   return os;
 }
