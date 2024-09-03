@@ -1,3 +1,4 @@
+#include "geo/utm.hpp"
 #include "parser/parser.hpp"
 #include "parser/rmc.hpp"
 
@@ -28,5 +29,7 @@ main ()
   run ("parse_utc", parse_utc_test);
   run ("rmc_construction", rmc_construction_test);
   run ("rmc_sentence", rmc_sentence_test);
+  run ("utm_conversion", utm_conversion_test);
+  run ("utm_direction", utm_direction_test);
   return failures == 0 ? 0 : 1;
 }
