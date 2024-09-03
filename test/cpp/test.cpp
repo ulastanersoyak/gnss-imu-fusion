@@ -1,4 +1,5 @@
 #include "geo/utm.hpp"
+#include "mti_630/xbus.hpp"
 #include "parser/parser.hpp"
 #include "parser/rmc.hpp"
 
@@ -31,5 +32,7 @@ main ()
   run ("rmc_sentence", rmc_sentence_test);
   run ("utm_conversion", utm_conversion_test);
   run ("utm_direction", utm_direction_test);
+  run ("xbus_parse", xbus_parse_test);
+  run ("xbus_framing", xbus_framing_test);
   return failures == 0 ? 0 : 1;
 }

@@ -1,203 +1,232 @@
 #include "mti_630/data_packet_parser.hpp"
-#include <arpa/inet.h>
+
+#include <bit>
 #include <cstddef>
 #include <cstdint>
-#include <iostream>
-#include <string.h>
 
-void
-DataPacketParser::parseDataPacket (const std::vector<uint8_t> &packet,
-                                   Xbus &xbusData)
+namespace
 {
-  size_t offset = 2; // packet = FA FF 36 16 10 60 04 09 3A 7C B7 20 30 0C BF
-                     // 49 1A 52 BE C3 6A 10 C3 2E E2 EF 3E
+constexpr std::uint8_t MID_MTDATA2 = 0x36;
 
-  // Check for MTData2 preamble
-  if (packet[offset] == 0x36)
-    {
-      offset++;                              // move past MTData2 identifier
-      uint8_t dataLengthMT = packet[offset]; // data length for MTData2
-      offset++; // move to the first data type in MTData2
-
-      size_t endMTData2
-          = offset + dataLengthMT; // Calculate the end of the MTData2 block
-
-      while (offset < endMTData2)
-        {
-          offset += 2; // Move past the 2-byte dataType
-          uint8_t dataLength = packet[offset];
-
-          offset++; // Move past dataLength byte
-          uint8_t *dataPtr = const_cast<uint8_t *> (
-              &packet[offset
-                      - 3]); // Adjust this to point to the start of dataType
-          parseMTData2 (&xbusData, dataPtr, dataLength + 3);
-
-          offset += dataLength; // Move past the data to the next data type
-        }
-    }
+std::uint16_t
+be_u16 (const std::uint8_t *p)
+{
+  return static_cast<std::uint16_t> ((p[0] << 8) | p[1]);
 }
 
-void
-DataPacketParser::dataswapendian (uint8_t *data, int len)
+std::uint32_t
+be_u32 (const std::uint8_t *p)
 {
-  int i = 0, j = len - 1;
-  while (i < j)
-    {
-      std::swap (data[i], data[j]);
-      i++;
-      j--;
-    }
+  return (static_cast<std::uint32_t> (p[0]) << 24)
+         | (static_cast<std::uint32_t> (p[1]) << 16)
+         | (static_cast<std::uint32_t> (p[2]) << 8) | p[3];
+}
+
+std::uint64_t
+be_u64 (const std::uint8_t *p)
+{
+  return (static_cast<std::uint64_t> (be_u32 (p)) << 32) | be_u32 (p + 4);
+}
+
+// Size in bytes of one value for the precision encoded in the low two bits of
+// the data id: float32, fp12.20, fp16.32, float64.
+std::size_t
+real_size (std::uint16_t dataId)
+{
+  constexpr std::array<std::size_t, 4> sizes{ 4, 4, 6, 8 };
+  return sizes[dataId & 0x3];
 }
 
 double
-DataPacketParser::parseFP1632 (const uint8_t *data)
+read_real (const std::uint8_t *p, std::uint16_t dataId)
 {
-  uint32_t fpfrac;
-  uint16_t fpint;
+  switch (dataId & 0x3)
+    {
+    case 0:
+      return std::bit_cast<float> (be_u32 (p));
+    case 1: // fp12.20, signed
+      return static_cast<std::int32_t> (be_u32 (p)) / 1048576.0;
+    case 2: // fp16.32: 32 bit fraction followed by a signed 16 bit integer
+      {
+        const auto fraction = static_cast<std::int64_t> (be_u32 (p));
+        const auto integer = static_cast<std::int16_t> (be_u16 (p + 4));
+        return static_cast<double> (static_cast<std::int64_t> (integer)
+                                        * 4294967296LL
+                                    + fraction)
+               / 4294967296.0;
+      }
+    default:
+      return std::bit_cast<double> (be_u64 (p));
+    }
+}
 
-  // Note: memcpy is used to prevent issues caused by alignment requirements
-  memcpy (&fpfrac, data, sizeof (fpfrac));
-  memcpy (&fpint, data + 4, sizeof (fpint));
-
-  // Convert the big-endian to the host's byte order
-  fpfrac = ntohl (fpfrac);
-  fpint = ntohs (fpint);
-
-  int64_t fp_i64 = (static_cast<int64_t> (fpint) << 32)
-                   | (static_cast<int64_t> (fpfrac) & 0xffffffff);
-
-  double rv_d = static_cast<double> (fp_i64) / 4294967296.0;
-  return rv_d;
+template <std::size_t N>
+bool
+read_reals (const std::uint8_t *p, std::size_t len, std::uint16_t dataId,
+            std::array<double, N> &out)
+{
+  const auto size = real_size (dataId);
+  if (len != N * size)
+    {
+      return false;
+    }
+  for (std::size_t i = 0; i < N; ++i)
+    {
+      out[i] = read_real (p + i * size, dataId);
+    }
+  return true;
 }
 
 void
-DataPacketParser::parseMTData2 (Xbus *self, uint8_t *data, uint8_t datalength)
+parse_item (Xbus &xbus, std::uint16_t dataId, const std::uint8_t *p,
+            std::size_t len)
 {
-  int offset = 0;
-
-  while (offset < datalength)
+  const auto frame = static_cast<xbus_frame> (dataId & 0x000C);
+  switch (dataId & 0xFFF0)
     {
-      uint16_t dataId
-          = (static_cast<uint16_t> (data[offset]) << 8) | data[offset + 1];
-      offset += 3; // i.e 10 60 04 0a 14 33 17  ==> 0a 14 33 17
-
-      switch (dataId)
+    case 0x1010: // UtcTime
+      if (len == 12)
         {
-        case 0x1020:
-          dataswapendian (&data[offset], 2);
-          self->packetCounter = *reinterpret_cast<uint16_t *> (&data[offset]);
-          self->packetCounterAvailable = true;
-          offset += 2;
-          break;
-        case 0x1060: // Sample time fine
-          dataswapendian (&data[offset], 4);
-          self->sampleTimeFine = *reinterpret_cast<uint32_t *> (&data[offset]);
-          self->sampleTimeFineAvailable = true;
-          offset += 4;
-          break;
-        case 0x1010: // UTC Time stamp
-          {
-            dataswapendian (&data[offset], 4);
-            [[maybe_unused]] uint32_t nanosec = data[offset];
-            offset += 4;
-
-            dataswapendian (&data[offset], 2);
-            [[maybe_unused]] uint16_t year = data[offset];
-            offset += 2;
-
-            [[maybe_unused]] uint8_t month = data[offset];
-            offset++;
-
-            [[maybe_unused]] uint8_t day = data[offset];
-            offset++;
-
-            uint8_t hour = data[offset];
-            offset++;
-
-            uint8_t minute = data[offset];
-            offset++;
-
-            uint8_t sec = data[offset];
-            offset++;
-
-            // uint8_t flags = *reinterpret_cast<uint8_t *>(&data[offset]);
-            offset++;
-
-            self->time = utc (hour, minute, sec);
-            self->utcTimeAvailable = true;
-            break;
-          }
-        case 0x2030: // Euler Angles
-          dataswapendian (&data[offset], 12);
-          memcpy (self->euler, &data[offset], 12);
-          self->eulerAvailable = true;
-          offset += 12;
-          break;
-        case 0x2010: // Quaternion.
-          dataswapendian (&data[offset], 16);
-          memcpy (self->quat, &data[offset], 16);
-          self->quaternionAvailable = true;
-          self->convertQuatToEuler ();
-          offset += 16;
-          break;
-        case 0x4020: // Acceleration
-          dataswapendian (&data[offset], 12);
-          memcpy (self->acc, &data[offset], 12);
-          self->accAvailable = true;
-          offset += 12;
-          break;
-
-        case 0x8020: // Rate of Turn
-          dataswapendian (&data[offset], 12);
-          memcpy (self->rot, &data[offset], 12);
-          self->rotAvailable = true;
-          offset += 12;
-          break;
-
-        case 0x5042: // Latitude Longitude, FP16.32
-          self->latlon[0] = parseFP1632 (&data[offset]);
-          offset += 6;
-          self->latlon[1] = parseFP1632 (&data[offset]);
-          self->latlonAvailable = true;
-          offset += 6;
-          break;
-        case 0x5022: // AltitudeEllipsoid, FP16.32
-          self->altitude = parseFP1632 (&data[offset]);
-          self->altitudeAvailable = true;
-          offset += 6;
-          break;
-        case 0xC020: // Magnetic Field
-          dataswapendian (&data[offset], 12);
-          memcpy (self->mag, &data[offset], 12);
-          self->magAvailable = true;
-          offset += 12;
-          break;
-        case 0xE020: // StatusWord
-          memcpy (&self->statusWord, &data[offset], 4);
-          self->statusWordAvailable = true;
-          offset += 4;
-          break;
-        case 0xD012: // Velocity, FP16.32
-          self->vel[0] = parseFP1632 (&data[offset]);
-          offset += 6;
-          self->vel[1] = parseFP1632 (&data[offset]);
-          offset += 6;
-          self->vel[2] = parseFP1632 (&data[offset]);
-          offset += 6;
-          self->velocityAvailable = true;
-          break;
-        default:
-          std::cout << "Unrecognized data ID: 0x" << std::hex << dataId
-                    << " at offset " << std::dec << offset
-                    << ". Following bytes: ";
-          for (int i = 0; i < std::min ((datalength - offset), 5); i++)
-            { // print up to next 5 bytes
-              std::cout << std::hex << static_cast<int> (data[offset + i])
-                        << " ";
-            }
-          std::cout << std::endl;
-          break;
+          const auto nanosec = be_u32 (p);
+          xbus.time = utc (p[8], p[9], p[10],
+                           static_cast<std::uint16_t> (nanosec / 1000000));
+          xbus.utcTimeAvailable = true;
         }
+      break;
+    case 0x1020: // PacketCounter
+      if (len == 2)
+        {
+          xbus.packetCounter = be_u16 (p);
+          xbus.packetCounterAvailable = true;
+        }
+      break;
+    case 0x1060: // SampleTimeFine
+      if (len == 4)
+        {
+          xbus.sampleTimeFine = be_u32 (p);
+          xbus.sampleTimeFineAvailable = true;
+        }
+      break;
+    case 0x2010: // Quaternion
+      xbus.quaternionAvailable = read_reals (p, len, dataId, xbus.quat);
+      xbus.quatFrame = frame;
+      xbus.convertQuatToEuler ();
+      break;
+    case 0x2030: // EulerAngles
+      xbus.eulerAvailable = read_reals (p, len, dataId, xbus.euler);
+      break;
+    case 0x4020: // Acceleration
+      xbus.accAvailable = read_reals (p, len, dataId, xbus.acc);
+      break;
+    case 0x4030: // FreeAcceleration
+      xbus.freeAccAvailable = read_reals (p, len, dataId, xbus.freeAcc);
+      xbus.freeAccFrame = frame;
+      break;
+    case 0x8020: // RateOfTurn
+      xbus.rotAvailable = read_reals (p, len, dataId, xbus.rot);
+      break;
+    case 0x5040: // LatLon
+      xbus.latlonAvailable = read_reals (p, len, dataId, xbus.latlon);
+      break;
+    case 0x5020: // AltitudeEllipsoid
+      {
+        std::array<double, 1> altitude{};
+        xbus.altitudeAvailable = read_reals (p, len, dataId, altitude);
+        xbus.altitude = altitude[0];
+        break;
+      }
+    case 0xC020: // MagneticField
+      xbus.magAvailable = read_reals (p, len, dataId, xbus.mag);
+      break;
+    case 0xD010: // VelocityXYZ
+      xbus.velocityAvailable = read_reals (p, len, dataId, xbus.vel);
+      break;
+    case 0xE020: // StatusWord
+      if (len == 4)
+        {
+          xbus.statusWord = be_u32 (p);
+          xbus.statusWordAvailable = true;
+        }
+      break;
+    default: // Unknown items are skipped using their length field.
+      break;
     }
+}
+
+// Maps a horizontal vector from the given local frame to {east, north}.
+std::array<double, 2>
+to_east_north (double x, double y, xbus_frame frame)
+{
+  switch (frame)
+    {
+    case xbus_frame::NED:
+      return { y, x };
+    case xbus_frame::NWU:
+      return { -y, x };
+    case xbus_frame::ENU:
+    default:
+      return { x, y };
+    }
+}
+} // namespace
+
+std::optional<std::array<double, 2>>
+Xbus::horizontalAccelerationEN () const
+{
+  if (freeAccAvailable)
+    {
+      return to_east_north (freeAcc[0], freeAcc[1], freeAccFrame);
+    }
+  if (accAvailable && quaternionAvailable)
+    {
+      // v' = v + 2w (u x v) + 2 u x (u x v), u = (x, y, z)
+      const auto &[w, x, y, z] = quat;
+      const auto &[vx, vy, vz] = acc;
+      const double tx = 2 * (y * vz - z * vy);
+      const double ty = 2 * (z * vx - x * vz);
+      const double tz = 2 * (x * vy - y * vx);
+      const double rx = vx + w * tx + (y * tz - z * ty);
+      const double ry = vy + w * ty + (z * tx - x * tz);
+      return to_east_north (rx, ry, quatFrame);
+    }
+  return std::nullopt;
+}
+
+bool
+DataPacketParser::parseDataPacket (const std::vector<uint8_t> &packet,
+                                   Xbus &xbusData)
+{
+  // FA FF 36 LEN <items> CS   or   FA FF 36 FF LENH LENL <items> CS
+  if (packet.size () < 5 || packet[2] != MID_MTDATA2)
+    {
+      return false;
+    }
+
+  const bool extended = packet[3] == 0xFF;
+  const std::size_t start = extended ? 6 : 4;
+  if (packet.size () < start + 1)
+    {
+      return false;
+    }
+  const std::size_t length = extended ? be_u16 (&packet[4]) : packet[3];
+  if (start + length + 1 != packet.size ())
+    {
+      return false;
+    }
+
+  const std::size_t end = start + length;
+  std::size_t offset = start;
+  while (offset + 3 <= end)
+    {
+      const auto dataId = be_u16 (&packet[offset]);
+      const std::size_t itemLength = packet[offset + 2];
+      offset += 3;
+      if (offset + itemLength > end)
+        {
+          return false;
+        }
+      parse_item (xbusData, dataId, &packet[offset], itemLength);
+      offset += itemLength;
+    }
+  return offset == end;
 }
