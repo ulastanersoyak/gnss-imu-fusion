@@ -1,4 +1,5 @@
 #include "geo/utm.hpp"
+#include "kalman/kalman.hpp"
 #include "mti_630/xbus.hpp"
 #include "parser/parser.hpp"
 #include "parser/rmc.hpp"
@@ -34,5 +35,9 @@ main ()
   run ("utm_direction", utm_direction_test);
   run ("xbus_parse", xbus_parse_test);
   run ("xbus_framing", xbus_framing_test);
+  run ("matrix", matrix_test);
+  run ("estimator_gps_only", estimator_gps_only_test);
+  run ("estimator_course", estimator_course_test);
+  run ("estimator_imu", estimator_imu_test);
   return failures == 0 ? 0 : 1;
 }

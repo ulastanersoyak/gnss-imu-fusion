@@ -1,6 +1,7 @@
 add_subdirectory(time_and_location)
 add_subdirectory(rmc)
 add_subdirectory(utm)
+add_subdirectory(kalman)
 add_subdirectory(gps)
 add_subdirectory(mti_630)
 
