@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="AccuracyOverlay/">
+    <file>AccuracyOverlay.qml</file>
+  </qresource>
+</RCC>

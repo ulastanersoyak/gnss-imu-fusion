@@ -39,3 +39,10 @@ add_subdirectory(src)
 
 enable_testing()
 add_subdirectory(test/cpp)
+
+# Gazebo simulation bridge, see sim/run.sh.
+find_package(gz-transport13 QUIET)
+find_package(gz-msgs10 QUIET)
+if(gz-transport13_FOUND AND gz-msgs10_FOUND)
+  add_subdirectory(sim)
+endif()
