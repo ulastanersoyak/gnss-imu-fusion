@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.22)
 
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+endif()
+
 if (NOT DEFINED CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 20)
 endif()
@@ -29,16 +33,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   )
 endif()
 
-set(CMAKE_BUILD_TYPE Debug)
-
-if(CMAKE_BUILD_TYPE STREQUAL Debug)
-  add_compile_options(-g)
-endif()
-
-if(CMAKE_BUILD_TYPE STREQUAL Release)
-  add_compile_options(-Ofast)
-endif()
+find_package(Threads REQUIRED)
 
 add_subdirectory(src)
 
+enable_testing()
 add_subdirectory(test/cpp)

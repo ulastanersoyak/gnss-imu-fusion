@@ -1,84 +1,202 @@
 #include "gps/gps.hpp"
+#include "kalman/position_estimator.hpp"
+#include "kalman/sensor_event.hpp"
 #include "mti_630/mti_630.hpp"
 #include "utility/queue.hpp"
-#include "utm/utm.hpp"
-#include "mti_630/data_packet_parser.hpp"
-#include <thread>
+
 #include <chrono>
+#include <csignal>
+#include <iomanip>
 #include <iostream>
+#include <memory>
+#include <optional>
+#include <thread>
 
+namespace
+{
+volatile std::sig_atomic_t stop_requested = 0;
 
-queue<Xbus> imu_data_queue{};
+void
+handle_signal (int /*signal*/)
+{
+  stop_requested = 1;
+}
 
-queue<utm> gps_data_queue{};
+template <typename... Ts> struct overloaded : Ts...
+{
+  using Ts::operator()...;
+};
+
+constexpr double prediction_horizon_s = 1.0;
+constexpr std::size_t imu_print_divider = 10; // 100 Hz IMU -> 10 Hz output
+
+void
+print_header ()
+{
+  std::cout << "source,fix_utc,age_s,lat,lon,easting,northing,vel_east,"
+               "vel_north,sigma_east,sigma_north,gps_easting,gps_northing,"
+               "ahead_easting,ahead_northing,status\n";
+}
+
+void
+print_row (std::string_view source, const position_estimator &estimator,
+           const gps_fix *fix, std::string_view status)
+{
+  const auto est = estimator.estimate ();
+  const auto ahead = estimator.predict_ahead (prediction_horizon_s);
+  if (!est || !ahead)
+    {
+      return;
+    }
+  const auto [lat, lon] = est->position.to_latlon ();
+
+  std::cout << std::fixed << source << ',' << est->position.time () << ','
+            << std::setprecision (2) << est->age_s << ','
+            << std::setprecision (8) << lat << ',' << lon << ','
+            << std::setprecision (3) << est->position.easting () << ','
+            << est->position.northing () << ',' << est->velocity_east_mps
+            << ',' << est->velocity_north_mps << ',' << est->sigma_east_m
+            << ',' << est->sigma_north_m << ',';
+  if (fix)
+    {
+      std::cout << fix->position.easting () << ','
+                << fix->position.northing ();
+    }
+  else
+    {
+      std::cout << ',';
+    }
+  std::cout << ',' << ahead->position.easting () << ','
+            << ahead->position.northing () << ',' << status << '\n';
+}
+
+std::string_view
+to_string (position_estimator::fix_result result)
+{
+  switch (result)
+    {
+    case position_estimator::fix_result::initialized:
+      return "initialized";
+    case position_estimator::fix_result::accepted:
+      return "accepted";
+    case position_estimator::fix_result::rejected:
+      return "rejected";
+    case position_estimator::fix_result::reset:
+      return "reset";
+    }
+  return "unknown";
+}
+} // namespace
 
 int
-main ()
+main (int argc, char *argv[])
 {
   // clang-format off
   // header,  utc,   fix, latitude  , longitude   ,knot ,,date  ,mode, checksum
   // $GNRMC,072336.00,A,3958.59380,N,03244.28403,E,0.053,,260724,,,A,V*18
   // clang-format on
 
-  //           GPIO 14-15 | 14->tx 15->rx | 1hz
-  gps gps_ ("/dev/ttyAMA0", 9600, boost::asio::serial_port_base::parity::none,
-            boost::asio::serial_port_base::stop_bits::one,
-            boost::asio::serial_port_base::character_size (8));
-
-  //           GPIO 8-9 | 9->tx 8->rx | 100 hz
-  mti_630 mti ("/dev/ttyAMA4", 115200,
-               boost::asio::serial_port_base::parity::none,
-               boost::asio::serial_port_base::stop_bits::one,
-               boost::asio::serial_port_base::character_size (8));
-
-  std::thread gps_thread (&gps::work, &gps_);
-  std::thread mti_thread (&mti_630::work, &mti);
-
-  utm future_utm{};
-  utm current_utm{};
-  utm prev_utm{};
-  bool is_first_gps_package{ true };
-  double distance{ 0.0 };
-  double time_diff { 0.0 };
-  directional_info direct {};
-  double estimated_speed_ms { 0.0 };
-
-  Xbus current_imu{ 0.0 };
-  Xbus prev_imu{ 0.0 };
-  bool is_first_imu_package{true};
-  while (true)
+  if (argc > 2)
     {
-      while(gps_data_queue.size() == 0)
-      {
-        current_imu = imu_data_queue.pop();
-        if (is_first_imu_package) [[unlikely]]
+      std::cerr << "usage: " << argv[0] << " [nmea_replay_file]\n";
+      return 2;
+    }
+  const bool replay = argc == 2;
+
+  std::signal (SIGINT, handle_signal);
+  std::signal (SIGTERM, handle_signal);
+
+  queue<sensor_event> events{};
+  std::unique_ptr<gps> gps_{};
+  std::unique_ptr<mti_630> mti{};
+
+  try
+    {
+      if (replay)
         {
-          prev_imu = current_imu;
-          is_first_imu_package = false;
+          gps_ = std::make_unique<gps> (argv[1]);
+        }
+      else
+        {
+          //           GPIO 14-15 | 14->tx 15->rx | 1hz
+          gps_ = std::make_unique<gps> (
+              "/dev/ttyAMA0", 9600,
+              boost::asio::serial_port_base::parity::none,
+              boost::asio::serial_port_base::stop_bits::one,
+              boost::asio::serial_port_base::character_size (8));
+        }
+    }
+  catch (const std::exception &e)
+    {
+      std::cerr << "cannot open gps: " << e.what () << "\n";
+      return 1;
+    }
+
+  // A replayed GPS log has no matching IMU data, so the IMU is live only.
+  if (!replay)
+    {
+      try
+        {
+          //           GPIO 8-9 | 9->tx 8->rx | 100 hz
+          mti = std::make_unique<mti_630> (
+              "/dev/ttyAMA4", 115200,
+              boost::asio::serial_port_base::parity::none,
+              boost::asio::serial_port_base::stop_bits::one,
+              boost::asio::serial_port_base::character_size (8));
+        }
+      catch (const std::exception &e)
+        {
+          std::cerr << "cannot open imu (" << e.what ()
+                    << "), running gps only\n";
+        }
+    }
+
+  // Declared after the devices so they are stopped and joined first.
+  std::jthread gps_thread ([&] (const std::stop_token &stop)
+                             { gps_->work (stop, events); });
+  std::jthread mti_thread{};
+  if (mti)
+    {
+      mti_thread = std::jthread ([&] (const std::stop_token &stop)
+                                   { mti->work (stop, events); });
+    }
+
+  position_estimator estimator{};
+  std::size_t imu_samples{ 0 };
+  print_header ();
+
+  while (stop_requested == 0)
+    {
+      auto event = events.pop_for (std::chrono::milliseconds (200));
+      if (!event)
+        {
+          continue;
+        }
+      if (std::holds_alternative<end_of_stream> (*event))
+        {
+          break;
         }
 
-        distance = current_utm.get_distance (prev_utm);
-        time_diff = current_utm.get_time_diff_sec (prev_utm);
-        direct = current_utm.get_direction (prev_utm);
-        estimated_speed_ms = distance / static_cast<double> (time_diff);
-
-        auto rate_of_turn_x = (std::abs(current_imu.rot[0] - prev_imu.rot[0]) > 0.01) ? current_imu.rot[0] - prev_imu.rot[0] : 0;
-        auto acc = (std::abs(current_imu.acc[0]) > 0.5) ? 0 : std::abs(current_imu.acc[0]) ;
-        auto new_speed = estimated_speed_ms + acc * 0.01;
-        auto new_speed_x = std::sin(direct.dir_degree + rate_of_turn_x);
-        auto new_speed_y = std::cos(direct.dir_degree + rate_of_turn_x);
-        current_utm.update_northing(new_speed_y * 0.01);
-        current_utm.update_easting(new_speed_x * 0.01);
-      }
-      current_utm = gps_data_queue.pop();
-      if (is_first_gps_package) [[unlikely]]
-      {
-        prev_utm = current_utm;
-        is_first_gps_package = false;
-      }
-      prev_utm = current_utm;
+      std::visit (
+          overloaded{
+              [&] (const gps_fix &fix)
+                {
+                  const auto result = estimator.add_gps_fix (fix);
+                  print_row ("gps", estimator, &fix, to_string (result));
+                },
+              [&] (const Xbus &sample)
+                {
+                  if (estimator.add_imu_sample (sample)
+                      && ++imu_samples % imu_print_divider == 0)
+                    {
+                      print_row ("imu", estimator, nullptr, "predicted");
+                    }
+                },
+              [] (const end_of_stream &) {},
+          },
+          *event);
     }
-  gps_thread.join ();
-  mti_thread.join ();
+
+  std::cout.flush ();
   return 0;
 }

@@ -1,85 +1,66 @@
 #include "mti_630/mti_630.hpp"
 #include "mti_630/data_packet_parser.hpp"
 #include "mti_630/xbus_packet.hpp"
-#include "utility/queue.hpp"
-#include <boost/asio.hpp>
-#include <iomanip>
+
+#include <array>
+#include <chrono>
 #include <iostream>
-#include <stdexcept>
-#include <string_view>
+#include <thread>
 
 mti_630::mti_630 (std::string_view port_name, std::uint32_t baud_rate,
                   boost::asio::serial_port_base::parity::type parity,
                   boost::asio::serial_port_base::stop_bits::type stop_bits,
                   boost::asio::serial_port_base::character_size char_size)
-    : service{}, port{ service }
+    : port_{ port_name, baud_rate, parity, stop_bits, char_size }
 {
-  try
-    {
-      port.open (port_name.data ());
-      port.set_option (boost::asio::serial_port_base::baud_rate (baud_rate));
-      port.set_option (boost::asio::serial_port_base::parity (parity));
-      port.set_option (boost::asio::serial_port_base::stop_bits (stop_bits));
-      port.set_option (char_size);
-    }
-  catch (const std::exception &e)
-    {
-
-      // clang-format off                                     flush the buffer
-      std::cerr << "err opening serial port := " << e.what () << std::endl;
-      // clang-format on
-    }
 }
 
-mti_630::~mti_630 ()
-{
-  if (port.is_open ())
-    port.close ();
-}
-
-char
-mti_630::read_byte ()
-{
-  char byte;
-  boost::asio::read (port, boost::asio::buffer (&byte, 1));
-
-  if (!port.is_open ())
-    throw std::runtime_error ("Failed to read from the serial port.");
-
-  return byte;
-}
-
-extern queue<Xbus> imu_data_queue;
-[[noreturn]] void
-mti_630::work ()
+void
+mti_630::work (const std::stop_token &stop, queue<sensor_event> &events)
 {
   XbusPacket packet{};
-  while (true)
+  std::array<std::uint8_t, 512> buffer{};
+  std::size_t bad_checksums{ 0 };
+
+  while (!stop.stop_requested ())
     {
+      std::size_t n{ 0 };
       try
         {
-          char byte = this->read_byte ();
-          packet.feedByte (static_cast<uint8_t> (byte));
-          if (packet.isPacketComplete ())
+          n = port_.read_some (buffer, std::chrono::milliseconds (100));
+        }
+      catch (const std::exception &e)
+        {
+          std::cerr << "mti_630: read error (" << e.what () << ")\n";
+          std::this_thread::sleep_for (std::chrono::seconds (1));
+          continue;
+        }
+
+      for (std::size_t i = 0; i < n; ++i)
+        {
+          packet.feedByte (buffer[i]);
+          while (packet.isPacketComplete ())
             {
               if (packet.validateChecksum ())
                 {
-                  Xbus xbusData;
-                  std::vector<uint8_t> rawData = packet.getRawData ();
-                  DataPacketParser::parseDataPacket (rawData, xbusData);
-                  imu_data_queue.push (xbusData);
+                  Xbus xbusData{};
+                  if (DataPacketParser::parseDataPacket (packet.getRawData (),
+                                                         xbusData))
+                    {
+                      events.push (xbusData);
+                    }
                   packet.reset ();
                 }
               else
                 {
-                  std::cerr << "Checksum invalid!" << std::endl;
+                  if (bad_checksums++ % 100 == 0)
+                    {
+                      std::cerr << "mti_630: invalid checksum ("
+                                << bad_checksums << " so far)\n";
+                    }
+                  packet.resync ();
                 }
             }
         }
-      catch (const std::exception &e)
-        {
-          std::cerr << "Error: " << e.what () << std::endl;
-        }
     }
 }
-
