@@ -1,4 +1,4 @@
-# future positioning
+# gnss-imu-fusion
 
 position estimation and short term position prediction for a raspberry pi 4
 carrying a u-blox max-m10s gnss receiver and an xsens mti-630 imu. gps fixes
