@@ -121,6 +121,11 @@ what is drawn:
 | kalman estimate of the current position | 0.60 | 1.04 |
 | raw gps fix | 1.88 | 3.50 |
 
+mean is the typical error. p95 is the 95th percentile: 95% of the errors
+were at or below it and only the worst 5% were above, so it shows how bad
+the less common cases (sharp turns, sudden speed changes) get without being
+set by a single outlier like the maximum is.
+
 at short horizons the prediction error equals the current position error
 (0.61 m at 10 ms), so what limits it there is the gps noise, not the
 prediction.
